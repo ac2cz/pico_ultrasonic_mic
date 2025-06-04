@@ -249,20 +249,13 @@ float getWindowFactor(){
 
 
 void windowedFFT(int flag , double scale ){
-/*
-  printf("FFT scale = %10.5f\n",scale) ;
-  printf("windowed FFT input:\n") ;
-    for(int k=8192 ; k<8212 ; k++){
-      printf("k=%4d Re=%10.5f Im=%10.5f\n",k,fftRe[k],fftIm[k]) ;
-      }
-*/
   for(int k=0 ; k<nFFT ; k++){
     //double w=0.54-0.46*Math.cos(2*Math.PI*k/(nFFT-1)) ;
     //double w=0.5-0.5*cos(2*M_PI*k/(nFFT-1)) ;
     double w=windowFun(k) ;
     fftRe[k]=fftRe[k]*w;
     fftIm[k]=fftIm[k]*w;
-    }
+  }
   fft1(flag ,scale/windowFactor) ;
   }
 
@@ -285,6 +278,7 @@ void spectrum_analysis() {
     for (int k=0; k<nFFT ; k++) { fftRe[k] -= DCsum ; }
   }
 
+//  fft1(1,2.0/nFFT);
   windowedFFT(1,2.0/nFFT);
 
   float maxFFT=0.0 ;
@@ -370,8 +364,8 @@ void loop() {
   }
   gpio_put(busyPin1, 0);
   adc_run(false);
-  send_samples();
-  //spectrum_analysis();
-  //send_spectrum();
+  //send_samples();
+  spectrum_analysis();
+  send_spectrum();
   sleep_ms(10000) ;
 }
