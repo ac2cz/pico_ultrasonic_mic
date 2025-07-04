@@ -1,11 +1,20 @@
 #include "hardware/adc.h"
 #include <math.h>
 #include <stdio.h>
+#include <Wire.h>
+#include "MCP4551.h"
 
-#define busyPin1 3
+#define I2C_SDA 20
+#define I2C_SCL 21
+#define FAN1_SENS 15 // GPIO 15 for Fan 1 sensor
+#define FAN2_SENS 14
+#define PI_RST 1 // The PI reset line?
 #define nFFT 64
 #define DCremove 1
 #define kHz 1e3
+
+// Instantiate objects used in this project
+MCP4551 myMCP4551;
 
 int debug_serial = false;
 
@@ -19,6 +28,7 @@ int cmdByte;
 
 float maxFFT = 0.0;
 int maxK = 0;
+int SOFT_GAIN=10; // This is a software gain value
 
 #define cpuClkKhz 125000  // data sheet says 133000 maximum
 //#define ADCclkDiv1 96  // 500 kHz samplesrate
@@ -183,7 +193,8 @@ void send_spectrum() {
   for (int k = 1; k <= nFFT / 2; k++) {
     //Serial1.print(",");
     //Serial1.print(sqrt(sqr((float)fftRe[k]) + sqr((float)fftIm[k])));
-    b = 256*(sqrt(sqr((float)fftRe[k]) + sqr((float)fftIm[k])))/1.80;
+    //////// NB: We arbitrarily added gain of 100 here.
+    b = SOFT_GAIN*256*(sqrt(sqr((float)fftRe[k]) + sqr((float)fftIm[k])))/1.80;
     Serial1.write(b);
   }
   Serial1.print("\n\r");  // without \r somehow this does not line wrap in minicom on the PI.  It works fine on Linux
@@ -289,11 +300,6 @@ void windowedFFT(int flag, double scale) {
 
 void spectrum_analysis() {
   for (int k = 0; k < nFFT; k++) {
-    //fftRe[k]=cos(2*PI*k*64.5/nFFT)+0.01*random(1.0) ;
-    // float frq=30e3 ;
-    // fftRe[k]=cos(2*M_PI*k*frq/sampleRate) +0.001*( rand()%10-5) ;
-    //frq=5.0 ;
-    // fftRe[k]=cos(2*M_PI*k*frq/nFFT) +0.001*( rand()%10-5) ;
     fftRe[k] = sampleBufferVolt(k);
     // printf("k=%3d sampleBufferVolt=%8.3f\n",k,sampleBufferVolt(k)) ;
     fftIm[k] = 0;
@@ -325,7 +331,16 @@ void spectrum_analysis() {
   }
 }
 
+/**
+* SETUP
+*/
 void setup() {
+  /* Start I2C comms to the Digital Gain POT */
+  Wire.setSDA(I2C_SDA);
+  Wire.setSCL(I2C_SCL);
+  Wire.begin();
+  myMCP4551.begin();
+
   pinMode(LED_BUILTIN, OUTPUT);
   Serial1.setPinout(16, 17);  // These are pins 21 and 22 on the pico.  21 is TX, 22 is RX
   Serial1.begin(38400);
@@ -338,8 +353,8 @@ void setup() {
   /* Set the system clock to a known value */
   set_sys_clock_khz(cpuClkKhz, true);
 
-  gpio_init(busyPin1);
-  gpio_set_dir(busyPin1, GPIO_OUT);
+  //gpio_init(busyPin1);
+  //gpio_set_dir(busyPin1, GPIO_OUT);
 
   for (int k = 0; k < nFFT; k++) {
     fftRe[k] = 0;
@@ -367,7 +382,46 @@ void clearSerialBuffer() {
   }
 }
 
+/* Test function, not used in normal operation */
+void scanI2c() {
+  byte error, address;
+  int nDevices;
+  Serial.println("Scanning...");
+  nDevices = 0;
+  for(address = 1; address < 127; address++ ) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      if (address<16) {
+
+        
+        Serial.print("0");
+      }
+      Serial.println(address,HEX);
+      nDevices++;
+    }
+    else if (error==4) {
+      Serial.print("Unknow error at address 0x");
+      if (address<16) {
+        Serial.print("0");
+      }
+      Serial.println(address,HEX);
+    }    
+  }
+  if (nDevices == 0) {
+    Serial.println("No I2C devices found\n");
+  }
+  else {
+    Serial.println("done\n");
+  }
+}
+
+/**
+ *  MAIN LOOP
+ */
 void loop() {
+
   // read the incoming byte:
   cmdBytes[0] = 0;
   while (Serial1.available() == 0) {} // wait for a command from the host
@@ -375,34 +429,44 @@ void loop() {
   testStr.trim();
 
   //    if (num > 0) {
-  if (testStr == "C") {  // C - Config
+  if (testStr == "C") {  // C - get Config - TODO - set / get the gain
     sprintf(stxt, "C nfft=%d fSample=%0.1f", nFFT, sampleRate);
     Serial1.println(stxt);
   }
   if (testStr == "D") {  // D - DATA
-    /// waitforDMA() ;
-    adc_run(false);
-    adc_fifo_drain();
-    adc_run(true);
+  
+    Wire.beginTransmission(MCP4552_DEFAULT_ADDRESS);
+    int rc = Wire.endTransmission();
+    if (rc == 0) {
+      myMCP4551.setWiper(0); // Wiper at B - Min Gain as full resistance in place
+      //myMCP4551.setWiper(0x100); // Wiper at A - Max Gain as no resistance in place
+      /// waitforDMA() ;
+      adc_run(false);
+      adc_fifo_drain();
+      adc_run(true);
 
-    /* TODO Not sure why we do this ..*/
-    for (int k = 0; k < 100; k++) {
-      adc_fifo_get_blocking();
-    }
-    for (int k = 0; k < nPreamble; k++) {
-      preambleBuffer[k] = adc_fifo_get_blocking();
-    }
+      /* TODO Not sure why we do this ..*/
+      for (int k = 0; k < 100; k++) {
+        adc_fifo_get_blocking();
+      }
+      for (int k = 0; k < nPreamble; k++) {
+        preambleBuffer[k] = adc_fifo_get_blocking();
+      }
 
-    //      gpio_put(busyPin1, 1);
-    for (int k = 0; k < nFFT; k++) {
-      sampleBuffer[k] = adc_fifo_get_blocking();
-      //  sampleBuffer[k]=k ;
+      //      gpio_put(busyPin1, 1);
+      for (int k = 0; k < nFFT; k++) {
+        sampleBuffer[k] = adc_fifo_get_blocking();
+        //  sampleBuffer[k]=k ;
+      }
+      //     gpio_put(busyPin1, 0);
+      adc_run(false);
+      //send_samples();
+      spectrum_analysis();
+      send_spectrum();
+    } else {
+      sprintf(stxt, "X %d No Digital POT\n\r", rc);
+       Serial1.print(stxt);
     }
-    //     gpio_put(busyPin1, 0);
-    adc_run(false);
-    //send_samples();
-    spectrum_analysis();
-    send_spectrum();
   }
   //    }
   clearSerialBuffer();
